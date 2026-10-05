@@ -1,219 +1,1601 @@
-name: Coletor INMET GUI (92 Municípios RJ)
+```yaml
+name: Atualização dos dados do CEMADEN RJ
+
+# ============================================================
+# CEMADEN/RJ - ATUALIZAÇÃO AUTOMÁTICA
+# Autor: Eduardo Peixoto - CIEVS/RJ
+#
+# Tudo integrado neste único arquivo YAML.
+#
+# Fluxo:
+#   1. Checkout
+#   2. Configuração do R
+#   3. Instalação dos pacotes
+#   4. Criação do script R inline
+#   5. Webscraping CEMADEN
+#   6. Leitura da malha municipal
+#   7. Consolidação
+#   8. Validação
+#   9. Geração do base_cemaden.rda
+#  10. Upload do artefato
+#  11. Deploy opcional via SSH
+# ============================================================
+
 
 on:
-  schedule:
-    - cron: '0 1 * * *'
-    - cron: '0 4 * * *'
-    - cron: '0 7 * * *'
-    - cron: '0 13 * * *'
-    - cron: '0 15 * * *'
+
+  # Execução manual
   workflow_dispatch:
 
-# 🔑 ESSENCIAL para permitir git push
+  # Execução automática
+  # 08:00 no horário de Brasília
+  # Brasília = UTC-3
+  # GitHub usa UTC -> 11:00 UTC
+  schedule:
+    - cron: "0 11 * * *"
+
+
 permissions:
-  contents: write
+  contents: read
+
+
+# Evita duas atualizações simultâneas
+concurrency:
+  group: atualizacao-cemaden-rj
+  cancel-in-progress: false
+
 
 jobs:
-  coletar-inmet:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
+
+  atualizar:
+
+    name: Atualizar CEMADEN/RJ
+
+    runs-on: ubuntu-latest
+
+
+    env:
+
+      # Arquivo da malha municipal dentro do repositório
+      CEMADEN_GPKG: data/rj_mun.gpkg
+
+      # Arquivo produzido pelo processo
+      CEMADEN_OUTPUT: output/base_cemaden.rda
+
+      # Locale
+      LANG: pt_BR.UTF-8
+      LC_ALL: pt_BR.UTF-8
+
 
     steps:
-      - name: Checkout
+
+      # ======================================================
+      # 1. CHECKOUT
+      # ======================================================
+
+      - name: Checkout do repositório
+
         uses: actions/checkout@v4
 
-      - name: Configurar Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
 
-      - name: Instalar dependências gráficas + Chrome + Chromedriver
-        run: |
-          sudo apt-get update
+      # ======================================================
+      # 2. VERIFICAR MALHA
+      # ======================================================
 
-          sudo apt-get install -y \
-            xvfb xauth x11-utils dbus-x11 \
-            libgtk-3-0 libgbm1 libasound2 \
-            libnss3 libxss1 libxtst6 \
-            libatk-bridge2.0-0 libatk1.0-0 \
-            libcups2 libdrm2 libxdamage1 \
-            libxrandr2 fonts-liberation \
-            wget unzip ca-certificates
+      - name: Verificar malha municipal
 
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get -f install -y
-          rm -f google-chrome-stable_current_amd64.deb
-
-          sudo apt-get install -y chromium-chromedriver
-
-          google-chrome --version
-          chromedriver --version
-
-      - name: Instalar dependências Python
-        run: |
-          python -m pip install --upgrade pip
-          pip install selenium==4.16.0 pandas==2.1.3
-
-      - name: Criar e executar coletor INMET (GUI)
         shell: bash
+
         run: |
-          cat > coletar_inmet.py << 'EOF'
-          import time, random, os, re
-          import pandas as pd
-          from datetime import datetime, timedelta
 
-          from selenium import webdriver
-          from selenium.webdriver.common.by import By
-          from selenium.webdriver.chrome.options import Options
-          from selenium.webdriver.support.ui import WebDriverWait
-          from selenium.webdriver.support import expected_conditions as EC
-          from selenium.webdriver.chrome.service import Service
-          from selenium.common.exceptions import TimeoutException, WebDriverException
+          echo "=============================================="
+          echo "VERIFICAÇÃO DA MALHA MUNICIPAL"
+          echo "=============================================="
 
-          MUNICIPIOS_RJ = [
-            '3300100','3300159','3300209','3300225','3300233','3300258','3300308',
-            '3300407','3300456','3300506','3300605','3300704','3300803','3300902',
-            '3300936','3300951','3301009','3301108','3301157','3301207','3301306',
-            '3301405','3301504','3301603','3301702','3301801','3301850','3301876',
-            '3301900','3302007','3302056','3302106','3302205','3302254','3302270',
-            '3302304','3302403','3302452','3302502','3302601','3302700','3302809',
-            '3302858','3302908','3303005','3303104','3303203','3303302','3303401',
-            '3303500','3303609','3303708','3303807','3303856','3303906','3303955',
-            '3304003','3304102','3304110','3304128','3304144','3304151','3304201',
-            '3304300','3304409','3304508','3304524','3304557','3304607','3304706',
-            '3304755','3304805','3304904','3305000','3305109','3305133','3305158',
-            '3305208','3305307','3305406','3305505','3305554','3305604','3305703',
-            '3305752','3305802','3305901','3306008','3306107','3306156','3306206',
-            '3306305'
-          ]
+          if [ ! -f "${CEMADEN_GPKG}" ]; then
 
-          MAX_TENTATIVAS = 10
+            echo "ERRO: arquivo ${CEMADEN_GPKG} não encontrado."
 
-          def criar_driver():
-              options = Options()
-              options.add_argument("--no-sandbox")
-              options.add_argument("--disable-dev-shm-usage")
-              options.add_argument("--window-size=1920,1080")
-              service = Service("/usr/bin/chromedriver")
-              driver = webdriver.Chrome(service=service, options=options)
-              driver.set_page_load_timeout(90)
-              return driver
+            echo ""
+            echo "Arquivos disponíveis:"
+            find . -maxdepth 3 -type f | sort
 
-          def coletar_municipio(driver, codigo):
-              url = f"https://previsao.inmet.gov.br/{codigo}"
-              hoje = datetime.today()
-              dados = []
+            exit 1
 
-              driver.get(url)
+          fi
 
-              WebDriverWait(driver, 60).until(
-                  EC.presence_of_element_located((By.CSS_SELECTOR, "section.grid.grid-template-columns-4"))
+          echo "Malha encontrada:"
+          ls -lh "${CEMADEN_GPKG}"
+
+
+      # ======================================================
+      # 3. CONFIGURAR R
+      # ======================================================
+
+      - name: Configurar R
+
+        uses: r-lib/actions/setup-r@v2
+
+        with:
+
+          r-version: "release"
+
+          use-public-rspm: true
+
+
+      # ======================================================
+      # 4. INSTALAR DEPENDÊNCIAS
+      # ======================================================
+
+      - name: Instalar dependências R
+
+        uses: r-lib/actions/setup-r-dependencies@v2
+
+        with:
+
+          packages: |
+            any::logger
+            any::purrr
+            any::httr
+            any::dplyr
+            any::stringr
+            any::xml2
+            any::rvest
+            any::janitor
+            any::magrittr
+            any::rlang
+            any::sf
+
+          needs: |
+            any::logger
+            any::purrr
+            any::httr
+            any::dplyr
+            any::stringr
+            any::xml2
+            any::rvest
+            any::janitor
+            any::magrittr
+            any::rlang
+            any::sf
+
+
+      # ======================================================
+      # 5. CRIAR DIRETÓRIO DE SAÍDA
+      # ======================================================
+
+      - name: Preparar diretórios
+
+        shell: bash
+
+        run: |
+
+          mkdir -p output
+
+
+      # ======================================================
+      # 6. CRIAR SCRIPT R INLINE
+      # ======================================================
+
+      - name: Criar script R inline
+
+        shell: bash
+
+        run: |
+
+          cat > /tmp/atualiza_cemaden.R <<'RSCRIPT'
+
+
+          # ==================================================
+          # ATUALIZAÇÃO DOS DADOS DO CEMADEN - RJ
+          # Autor: Eduardo Peixoto - CIEVS/RJ
+          # ==================================================
+
+          options(
+            warn = 1,
+            stringsAsFactors = FALSE
+          )
+
+
+          # ==================================================
+          # PACOTES
+          # ==================================================
+
+          suppressPackageStartupMessages({
+
+            library(logger)
+            library(purrr)
+            library(httr)
+            library(dplyr)
+            library(stringr)
+            library(xml2)
+            library(rvest)
+            library(janitor)
+            library(magrittr)
+            library(rlang)
+            library(sf)
+
+          })
+
+
+          # ==================================================
+          # LOG INICIAL
+          # ==================================================
+
+          logger::log_info(
+            "=============================================="
+          )
+
+          logger::log_info(
+            "ATUALIZAÇÃO CEMADEN/RJ"
+          )
+
+          logger::log_info(
+            "Início da atualização"
+          )
+
+          logger::log_info(
+            "Data/hora: {format(Sys.time(), '%Y-%m-%d %H:%M:%S')}"
+          )
+
+          logger::log_info(
+            "=============================================="
+          )
+
+
+          # ==================================================
+          # CONFIGURAÇÃO
+          # ==================================================
+
+          gpkg_path <- Sys.getenv(
+            "CEMADEN_GPKG",
+            unset = "data/rj_mun.gpkg"
+          )
+
+
+          output_path <- Sys.getenv(
+            "CEMADEN_OUTPUT",
+            unset = "output/base_cemaden.rda"
+          )
+
+
+          dir.create(
+            dirname(output_path),
+            recursive = TRUE,
+            showWarnings = FALSE
+          )
+
+
+          logger::log_info(
+            "Malha: {gpkg_path}"
+          )
+
+          logger::log_info(
+            "Saída: {output_path}"
+          )
+
+
+          # ==================================================
+          # VALIDAR GPKG
+          # ==================================================
+
+          if (!file.exists(gpkg_path)) {
+
+            logger::log_error(
+              "Arquivo de malha não encontrado."
+            )
+
+            stop(
+              paste0(
+                "Arquivo não encontrado: ",
+                gpkg_path
+              ),
+              call. = FALSE
+            )
+
+          }
+
+
+          # ==================================================
+          # CONFIGURAÇÃO HTTP
+          # ==================================================
+
+          logger::log_info(
+            "Configurando conexão com CEMADEN"
+          )
+
+
+          config <- httr::config(
+            ssl_verifypeer = 0L
+          )
+
+
+          base_url <-
+            "https://painelcemadenrj.defesacivil.rj.gov.br"
+
+
+          # ==================================================
+          # FUNÇÃO DE DOWNLOAD
+          # ==================================================
+
+          baixar_html <- function(url) {
+
+            logger::log_info(
+              "Acessando: {url}"
+            )
+
+            resposta <- httr::RETRY(
+
+              verb = "GET",
+
+              url = url,
+
+              config = config,
+
+              times = 3,
+
+              pause_base = 2,
+
+              pause_cap = 10,
+
+              quiet = FALSE,
+
+              httr::timeout(90)
+
+            )
+
+
+            httr::stop_for_status(
+              resposta
+            )
+
+
+            conteudo <- httr::content(
+              resposta,
+              as = "text",
+              encoding = "UTF-8"
+            )
+
+
+            if (
+              is.null(conteudo) ||
+              nchar(conteudo) == 0
+            ) {
+
+              stop(
+                paste0(
+                  "Resposta vazia para: ",
+                  url
+                ),
+                call. = FALSE
               )
 
-              time.sleep(3)
-              
-              # Encontrar todas as seções com 4 colunas
-              sections = driver.find_elements(By.CSS_SELECTOR, "section.grid.grid-template-columns-4")
-              
-              for dia_idx, section in enumerate(sections[:5]):  # Apenas 5 dias
-                  items = section.find_elements(By.CSS_SELECTOR, "div.item")
-                  
-                  temp_min = None
-                  temp_max = None
-                  
-                  for item in items:
-                      texto = item.text
-                      
-                      # Verificar se é temperatura mínima (especificamente Temperatura, não Umidade)
-                      if "Temperatura Mínima" in texto:
-                          # Extrair número usando regex
-                          match = re.search(r'(\d+)\s*°?C?', texto)
-                          if match:
-                              temp_min = match.group(1)
-                      
-                      # Verificar se é temperatura máxima (especificamente Temperatura, não Umidade)
-                      if "Temperatura Máxima" in texto:
-                          match = re.search(r'(\d+)\s*°?C?', texto)
-                          if match:
-                              temp_max = match.group(1)
-                  
-                  if temp_min and temp_max:
-                      dados.append({
-                          "codigo_municipio": codigo,
-                          "data": (hoje + timedelta(days=dia_idx)).strftime("%Y-%m-%d"),
-                          "temp_min": temp_min,
-                          "temp_max": temp_max,
-                          "data_coleta": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                      })
-              
-              if not dados:
-                  raise ValueError("Sem dados extraídos")
+            }
 
-              return dados
 
-          driver = criar_driver()
-          todos = []
+            conteudo
 
-          for i, codigo in enumerate(MUNICIPIOS_RJ, 1):
-              print(f"[{i:03d}/092] Município {codigo}")
+          }
 
-              sucesso = False
 
-              for tentativa in range(1, MAX_TENTATIVAS + 1):
-                  try:
-                      print(f"  Tentativa {tentativa}/10")
-                      dados = coletar_municipio(driver, codigo)
-                      todos.extend(dados)
-                      sucesso = True
-                      break
+          # ==================================================
+          # WEBSCRAPING 1
+          # HIDROLÓGICO + GEOLÓGICO
+          # ==================================================
 
-                  except (TimeoutException, WebDriverException, Exception) as e:
-                      print(f"  Erro: {e}")
-                      espera = 5 + tentativa * 5
-                      print(f"  Aguardando {espera}s...")
-                      time.sleep(espera)
+          logger::log_info(
+            "----------------------------------------------"
+          )
 
-                      try:
-                          driver.quit()
-                      except:
-                          pass
-                      driver = criar_driver()
+          logger::log_info(
+            "WEBSCRAPING 1"
+          )
 
-              if not sucesso:
-                  print(f"  ❌ Falhou após 10 tentativas: {codigo}")
+          logger::log_info(
+            "Hidrológico + Geológico"
+          )
 
-              time.sleep(random.uniform(3, 7))
 
-          driver.quit()
+          base1 <- purrr::map(
 
-          df = pd.DataFrame(todos)
-          if df.empty:
-              df = pd.DataFrame(columns=["codigo_municipio","data","temp_min","temp_max","data_coleta"])
+            c(
+              "hidro",
+              "geo"
+            ),
 
-          df.to_csv("inmet.csv", index=False)
-          os.chmod("inmet.csv", 0o666)
+            function(tipo) {
 
-          with open("coleta_status.txt","w") as f:
-              f.write(f"STATUS: SUCESSO\nREGISTROS: {len(df)}\nDATA: {datetime.now()}\n")
-          os.chmod("coleta_status.txt", 0o666)
-          EOF
+              url <- paste0(
 
-          Xvfb :99 -screen 0 1920x1080x24 &
-          export DISPLAY=:99
-          sleep 5
+                base_url,
 
-          python coletar_inmet.py
+                "/monitoramento/v2/municipio/?action=",
 
-      - name: Commitar resultados
-        if: always()
+                tipo
+
+              )
+
+
+              html <- baixar_html(
+                url
+              )
+
+
+              tabela <- html |>
+
+                xml2::read_html() |>
+
+                rvest::html_table() |>
+
+                purrr::pluck(1) |>
+
+                magrittr::extract(
+                  -1,
+                  ,
+                  drop = FALSE
+                ) |>
+
+                janitor::clean_names()
+
+
+              if (
+                nrow(tabela) == 0
+              ) {
+
+                stop(
+                  paste0(
+                    "Tabela vazia para ",
+                    tipo
+                  ),
+                  call. = FALSE
+                )
+
+              }
+
+
+              tabela
+
+            }
+
+          ) |>
+
+            purrr::reduce(
+              dplyr::full_join,
+              by = "municipio"
+            ) |>
+
+            janitor::clean_names() |>
+
+            dplyr::arrange(
+              municipio
+            )
+
+
+          base1 <- rlang::set_names(
+
+            base1,
+
+            gsub(
+              "_x",
+              "_hidrologico",
+              names(base1)
+            )
+
+          )
+
+
+          base1 <- rlang::set_names(
+
+            base1,
+
+            gsub(
+              "_y",
+              "_geologico",
+              names(base1)
+            )
+
+          )
+
+
+          logger::log_info(
+            "Webscraping 1 concluído."
+          )
+
+          logger::log_info(
+            "Municípios encontrados: {nrow(base1)}"
+          )
+
+
+          # ==================================================
+          # WEBSCRAPING 2
+          # METEOROLÓGICO + INCÊNDIO
+          # ==================================================
+
+          logger::log_info(
+            "----------------------------------------------"
+          )
+
+          logger::log_info(
+            "WEBSCRAPING 2"
+          )
+
+          logger::log_info(
+            "Meteorológico + Incêndio"
+          )
+
+
+          base2 <- purrr::map(
+
+            c(
+              "1",
+              "2"
+            ),
+
+            function(tipo) {
+
+              url <- paste0(
+
+                base_url,
+
+                "/monitoramento/v2/mapa/redec.php?action=",
+
+                tipo
+
+              )
+
+
+              html <- baixar_html(
+                url
+              )
+
+
+              resultado <- html |>
+
+                xml2::read_html() |>
+
+                rvest::html_elements(
+
+                  xpath =
+                    '//*[contains(concat( " ", @class, " " ),
+                    concat( " ", "bg-success", " " ))]'
+
+                ) |>
+
+                rvest::html_text() |>
+
+                tibble::as_tibble() |>
+
+                dplyr::mutate(
+
+                  regiao =
+                    stringr::str_extract(
+                      value,
+                      "^[^-]+"
+                    ) |>
+                    stringr::str_trim(),
+
+                  nivel =
+                    stringr::str_extract(
+                      value,
+                      "(?<=- ).*(?=-)"
+                    ) |>
+                    stringr::str_trim()
+
+                ) |>
+
+                dplyr::select(
+                  -value
+                ) |>
+
+                janitor::clean_names()
+
+
+              if (
+                nrow(resultado) == 0
+              ) {
+
+                stop(
+                  paste0(
+                    "Nenhuma região encontrada para action=",
+                    tipo
+                  ),
+                  call. = FALSE
+                )
+
+              }
+
+
+              resultado
+
+            }
+
+          ) |>
+
+            purrr::reduce(
+
+              dplyr::full_join,
+
+              by = "regiao"
+
+            ) |>
+
+            janitor::clean_names() |>
+
+            dplyr::mutate(
+
+              risco_metereologico =
+                nivel_x,
+
+              risco_incendio =
+                nivel_y
+
+            ) |>
+
+            dplyr::select(
+
+              -nivel_x,
+              -nivel_y
+
+            )
+
+
+          logger::log_info(
+            "Webscraping 2 concluído."
+          )
+
+          logger::log_info(
+            "Regiões encontradas: {nrow(base2)}"
+          )
+
+
+          # ==================================================
+          # CONSOLIDAÇÃO
+          # ==================================================
+
+          logger::log_info(
+            "Consolidando informações"
+          )
+
+
+          base3 <- base1 |>
+
+            dplyr::select(
+
+              municipio,
+
+              redec_hidrologico,
+
+              risco_atual_hidrologico,
+
+              risco_atual_geologico
+
+            ) |>
+
+            dplyr::mutate(
+
+              regiao =
+                stringr::str_squish(
+                  redec_hidrologico
+                )
+
+            ) |>
+
+            dplyr::full_join(
+
+              base2,
+
+              by = "regiao"
+
+            ) |>
+
+            dplyr::select(
+
+              regiao,
+
+              municipio,
+
+              risco_atual_hidrologico,
+
+              risco_atual_geologico,
+
+              risco_metereologico,
+
+              risco_incendio
+
+            )
+
+
+          # ==================================================
+          # MALHA MUNICIPAL
+          # ==================================================
+
+          logger::log_info(
+            "Carregando malha municipal"
+          )
+
+
+          rj_mun <- sf::read_sf(
+
+            gpkg_path,
+
+            quiet = TRUE
+
+          ) |>
+
+            dplyr::mutate(
+
+              mun_tipo_6 =
+                toupper(
+                  name_muni
+                )
+
+            ) |>
+
+            dplyr::full_join(
+
+              base3,
+
+              by = c(
+                "mun_tipo_6" = "municipio"
+              )
+
+            )
+
+
+          logger::log_info(
+            "Registros da malha: {nrow(rj_mun)}"
+          )
+
+
+          # ==================================================
+          # WEBSCRAPING 3
+          # HISTÓRICO DA REDEC
+          # ==================================================
+
+          logger::log_info(
+            "----------------------------------------------"
+          )
+
+          logger::log_info(
+            "WEBSCRAPING 3"
+          )
+
+          logger::log_info(
+            "Histórico da REDEC"
+          )
+
+
+          url_historico <- paste0(
+
+            base_url,
+
+            "/monitoramento/v2/mapa/redec.php?action=2"
+
+          )
+
+
+          html_historico <- baixar_html(
+            url_historico
+          )
+
+
+          page <- xml2::read_html(
+            html_historico
+          )
+
+
+          ul_element <- rvest::html_elements(
+
+            page,
+
+            "ul.list-group"
+
+          )
+
+
+          html_table <- rvest::html_text(
+            ul_element
+          )
+
+
+          if (
+            length(html_table) == 0
+          ) {
+
+            stop(
+              "Não foi encontrado ul.list-group.",
+              call. = FALSE
+            )
+
+          }
+
+
+          table_rows <- strsplit(
+
+            html_table,
+
+            "Histórico da Redec"
+
+          )[[1]]
+
+
+          table_rows <- trimws(
+            table_rows
+          )
+
+
+          table_data <- lapply(
+
+            table_rows,
+
+            function(row) {
+
+              region <- gsub(
+                " - .*",
+                "",
+                row
+              )
+
+
+              status <- gsub(
+
+                ".* - (.*?) - .*",
+
+                "\\1",
+
+                row
+
+              )
+
+
+              history <- gsub(
+
+                ".*Histórico da Redec(.*)",
+
+                "\\1",
+
+                row
+
+              )
+
+
+              data.frame(
+
+                Region = region,
+
+                Status = status,
+
+                History = history,
+
+                stringsAsFactors = FALSE
+
+              )
+
+            }
+
+          )
+
+
+          table_df <- do.call(
+            rbind,
+            table_data
+          )
+
+
+          table_df <- head(
+            table_df,
+            11
+          )
+
+
+          # ==================================================
+          # TRATAMENTO STATUS
+          # ==================================================
+
+          table_df$Status <-
+
+            stringr::str_extract(
+
+              table_df$Status,
+
+              "(?<=-).*"
+
+            ) |>
+
+            stringr::str_trim()
+
+
+          table_df$regiao <-
+            table_df$Region
+
+
+          # ==================================================
+          # JOIN HISTÓRICO
+          # ==================================================
+
+          a <- dplyr::full_join(
+
+            rj_mun,
+
+            table_df,
+
+            by = "regiao"
+
+          )
+
+
+          # ==================================================
+          # RISCO DE INCÊNDIO
+          # ==================================================
+
+          if (
+            "Status" %in% names(a)
+          ) {
+
+            a$risco_incendio <-
+              a$Status
+
+            a$Status <- NULL
+
+          }
+
+
+          # ==================================================
+          # CORREÇÃO ORIGINAL
+          # ==================================================
+
+          if (
+            nrow(a) >= 93 &&
+            nrow(a) >= 5
+          ) {
+
+            a$risco_atual_hidrologico[5] <-
+              a$risco_atual_hidrologico[93]
+
+
+            a$risco_atual_geologico[5] <-
+              a$risco_atual_geologico[93]
+
+
+            a$risco_incendio[5] <-
+              a$risco_incendio[93]
+
+
+            if (
+              "Region" %in% names(a)
+            ) {
+
+              a$Region[5] <-
+                "BAIXADA LITORÂNEA"
+
+            }
+
+
+            a$regiao[5] <-
+              "BAIXADA LITORÂNEA"
+
+          }
+
+
+          # ==================================================
+          # MANTER 92 MUNICÍPIOS
+          # ==================================================
+
+          a <- head(
+            a,
+            92
+          )
+
+
+          rj_mun <- a
+
+
+          # ==================================================
+          # VALIDAÇÃO FINAL
+          # ==================================================
+
+          logger::log_info(
+            "----------------------------------------------"
+          )
+
+          logger::log_info(
+            "VALIDAÇÃO FINAL"
+          )
+
+
+          logger::log_info(
+            "Total de registros: {nrow(rj_mun)}"
+          )
+
+
+          # --------------------------------------------------
+          # Validação de quantidade
+          # --------------------------------------------------
+
+          if (
+            nrow(rj_mun) != 92
+          ) {
+
+            logger::log_error(
+              "Quantidade diferente de 92 municípios."
+            )
+
+            stop(
+
+              paste0(
+
+                "Base inválida: ",
+
+                nrow(rj_mun),
+
+                " registros encontrados. Esperado: 92."
+
+              ),
+
+              call. = FALSE
+
+            )
+
+          }
+
+
+          # --------------------------------------------------
+          # Validação das colunas
+          # --------------------------------------------------
+
+          colunas_obrigatorias <- c(
+
+            "regiao",
+
+            "risco_atual_hidrologico",
+
+            "risco_atual_geologico",
+
+            "risco_metereologico",
+
+            "risco_incendio"
+
+          )
+
+
+          faltantes <- setdiff(
+
+            colunas_obrigatorias,
+
+            names(rj_mun)
+
+          )
+
+
+          if (
+            length(faltantes) > 0
+          ) {
+
+            logger::log_error(
+
+              "Colunas ausentes: {paste(faltantes, collapse = ', ')}"
+
+            )
+
+            stop(
+
+              "Estrutura da base incompatível.",
+
+              call. = FALSE
+
+            )
+
+          }
+
+
+          # ==================================================
+          # VALIDAÇÃO DE MUNICÍPIOS
+          # ==================================================
+
+          if (
+            !"name_muni" %in% names(rj_mun)
+          ) {
+
+            stop(
+              "Coluna name_muni não encontrada.",
+              call. = FALSE
+            )
+
+          }
+
+
+          municipios_validos <- sum(
+
+            !is.na(
+              rj_mun$name_muni
+            )
+
+          )
+
+
+          logger::log_info(
+
+            "Municípios com nome preenchido: {municipios_validos}"
+
+          )
+
+
+          if (
+            municipios_validos != 92
+          ) {
+
+            stop(
+
+              paste0(
+
+                "Foram encontrados ",
+
+                municipios_validos,
+
+                " municípios válidos. Esperado: 92."
+
+              ),
+
+              call. = FALSE
+
+            )
+
+          }
+
+
+          # ==================================================
+          # EXPORTAÇÃO
+          # ==================================================
+
+          logger::log_info(
+            "----------------------------------------------"
+          )
+
+          logger::log_info(
+            "EXPORTAÇÃO"
+          )
+
+
+          save(
+
+            rj_mun,
+
+            file = output_path
+
+          )
+
+
+          logger::log_info(
+
+            "Arquivo criado: {output_path}"
+
+          )
+
+
+          # ==================================================
+          # METADATA
+          # ==================================================
+
+          metadata_path <- sub(
+
+            "\\.rda$",
+
+            "_metadata.txt",
+
+            output_path
+
+          )
+
+
+          writeLines(
+
+            c(
+
+              "CEMADEN/RJ",
+
+              paste0(
+
+                "Atualização: ",
+
+                format(
+
+                  Sys.time(),
+
+                  "%Y-%m-%d %H:%M:%S"
+
+                )
+
+              ),
+
+              paste0(
+
+                "Municípios: ",
+
+                nrow(rj_mun)
+
+              ),
+
+              paste0(
+
+                "Arquivo: ",
+
+                output_path
+
+              )
+
+            ),
+
+            metadata_path
+
+          )
+
+
+          # ==================================================
+          # RESUMO NO LOG
+          # ==================================================
+
+          logger::log_info(
+            "----------------------------------------------"
+          )
+
+          logger::log_info(
+            "RESUMO DA BASE"
+          )
+
+
+          logger::log_info(
+            "Linhas: {nrow(rj_mun)}"
+          )
+
+          logger::log_info(
+            "Colunas: {ncol(rj_mun)}"
+          )
+
+
+          logger::log_info(
+            "Arquivo: {output_path}"
+          )
+
+
+          # ==================================================
+          # FINAL
+          # ==================================================
+
+          logger::log_success(
+            "=============================================="
+          )
+
+          logger::log_success(
+            "CEMADEN/RJ ATUALIZADO COM SUCESSO"
+          )
+
+          logger::log_success(
+            "=============================================="
+          )
+
+
+          RSCRIPT
+
+
+      # ======================================================
+      # 7. EXECUTAR R
+      # ======================================================
+
+      - name: Executar atualização CEMADEN
+
+        shell: bash
+
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add inmet.csv coleta_status.txt
+          echo "=============================================="
+          echo "EXECUTANDO SCRAPING CEMADEN"
+          echo "=============================================="
 
-          if ! git diff --cached --quiet; then
-            git commit -m "🖥️ INMET GUI - $(date '+%Y-%m-%d %H:%M:%S')"
-            git pull origin main --rebase --autostash || true
-            git push origin main
+          Rscript /tmp/atualiza_cemaden.R
+
+
+      # ======================================================
+      # 8. VALIDAR ARQUIVO
+      # ======================================================
+
+      - name: Validar arquivo gerado
+
+        shell: bash
+
+        run: |
+
+          echo "=============================================="
+          echo "VALIDAÇÃO DO RESULTADO"
+          echo "=============================================="
+
+          if [ ! -f "output/base_cemaden.rda" ]; then
+
+            echo "ERRO: base_cemaden.rda não foi criada."
+
+            exit 1
+
           fi
+
+
+          if [ ! -s "output/base_cemaden.rda" ]; then
+
+            echo "ERRO: base_cemaden.rda está vazia."
+
+            exit 1
+
+          fi
+
+
+          echo ""
+          echo "Arquivo:"
+          ls -lh output/base_cemaden.rda
+
+
+          echo ""
+          echo "Metadata:"
+
+          if [ -f "output/base_cemaden_metadata.txt" ]; then
+
+            cat output/base_cemaden_metadata.txt
+
+          fi
+
+
+      # ======================================================
+      # 9. TESTAR BASE NOVAMENTE PELO R
+      # ======================================================
+
+      - name: Teste final da base R
+
+        shell: bash
+
+        run: |
+
+          Rscript - <<'RSCRIPT'
+
+          load(
+            "output/base_cemaden.rda"
+          )
+
+          cat(
+            "Objeto encontrado:",
+            exists("rj_mun"),
+            "\n"
+          )
+
+          cat(
+            "Linhas:",
+            nrow(rj_mun),
+            "\n"
+          )
+
+          cat(
+            "Colunas:",
+            ncol(rj_mun),
+            "\n"
+          )
+
+          if (
+            !exists("rj_mun")
+          ) {
+
+            stop(
+              "Objeto rj_mun não encontrado."
+            )
+
+          }
+
+          if (
+            nrow(rj_mun) != 92
+          ) {
+
+            stop(
+              paste0(
+                "Número inválido de municípios: ",
+                nrow(rj_mun)
+              )
+            )
+
+          }
+
+          cat(
+            "VALIDAÇÃO OK\n"
+          )
+
+          RSCRIPT
+
+
+      # ======================================================
+      # 10. UPLOAD DO ARTEFATO
+      # ======================================================
+
+      - name: Publicar base CEMADEN
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: base-cemaden-rj
+
+          path: |
+
+            output/base_cemaden.rda
+
+            output/base_cemaden_metadata.txt
+
+          retention-days: 30
+
+
+      # ======================================================
+      # 11. CONFIGURAR SSH
+      #
+      # O deploy só acontece se os três Secrets existirem.
+      # ======================================================
+
+      - name: Preparar SSH
+
+        if: >-
+          ${{ secrets.DEPLOY_HOST != '' &&
+              secrets.DEPLOY_USER != '' &&
+              secrets.DEPLOY_KEY != '' }}
+
+        shell: bash
+
+        env:
+
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+
+        run: |
+
+          echo "Preparando conexão SSH..."
+
+          mkdir -p ~/.ssh
+
+          echo "$DEPLOY_KEY" \
+            > ~/.ssh/cemaden_deploy
+
+          chmod 600 \
+            ~/.ssh/cemaden_deploy
+
+
+          ssh-keyscan \
+            -H \
+            "${{ secrets.DEPLOY_HOST }}" \
+            >> ~/.ssh/known_hosts
+
+
+      # ======================================================
+      # 12. DEPLOY DA BASE
+      # ======================================================
+
+      - name: Enviar base para servidor
+
+        if: >-
+          ${{ secrets.DEPLOY_HOST != '' &&
+              secrets.DEPLOY_USER != '' &&
+              secrets.DEPLOY_KEY != '' }}
+
+        shell: bash
+
+        run: |
+
+          echo "=============================================="
+          echo "DEPLOY CEMADEN"
+          echo "=============================================="
+
+
+          scp \
+
+            -i ~/.ssh/cemaden_deploy \
+
+            -o StrictHostKeyChecking=yes \
+
+            output/base_cemaden.rda \
+
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/home/peduardo/base_cemaden.rda"
+
+
+          echo "Base enviada com sucesso."
+
+
+      # ======================================================
+      # 13. ATUALIZAR SHINY
+      # ======================================================
+
+      - name: Atualizar aplicação Shiny
+
+        if: >-
+          ${{ secrets.DEPLOY_HOST != '' &&
+              secrets.DEPLOY_USER != '' &&
+              secrets.DEPLOY_KEY != '' }}
+
+        shell: bash
+
+        run: |
+
+          ssh \
+
+            -i ~/.ssh/cemaden_deploy \
+
+            -o StrictHostKeyChecking=yes \
+
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+
+            "touch /srv/shiny-server/cemaden/app.R"
+
+
+          echo "Aplicação Shiny atualizada."
+
+
+      # ======================================================
+      # 14. VERIFICAR DEPLOY
+      # ======================================================
+
+      - name: Verificar deploy
+
+        if: >-
+          ${{ secrets.DEPLOY_HOST != '' &&
+              secrets.DEPLOY_USER != '' &&
+              secrets.DEPLOY_KEY != '' }}
+
+        shell: bash
+
+        run: |
+
+          echo "Verificando arquivo no servidor..."
+
+
+          ssh \
+
+            -i ~/.ssh/cemaden_deploy \
+
+            -o StrictHostKeyChecking=yes \
+
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+
+            "ls -lh /home/peduardo/base_cemaden.rda"
+
+
+          echo "Deploy confirmado."
+
+
+      # ======================================================
+      # 15. LIMPAR SSH
+      # ======================================================
+
+      - name: Limpar credenciais SSH
+
+        if: always()
+
+        shell: bash
+
+        run: |
+
+          rm -f ~/.ssh/cemaden_deploy
+
+          echo "Credenciais temporárias removidas."
+
+
+      # ======================================================
+      # 16. FINAL
+      # ======================================================
+
+      - name: Finalização
+
+        if: success()
+
+        shell: bash
+
+        run: |
+
+          echo ""
+          echo "=============================================="
+          echo "CEMADEN/RJ"
+          echo "ATUALIZAÇÃO CONCLUÍDA COM SUCESSO"
+          echo "=============================================="
+          echo ""
+          echo "Base: output/base_cemaden.rda"
+          echo "Municípios: 92"
+          echo "Deploy: concluído se SSH estiver configurado"
+          echo ""
+```
